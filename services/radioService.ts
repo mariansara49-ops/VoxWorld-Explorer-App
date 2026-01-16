@@ -9,7 +9,7 @@ export interface Country {
   stationcount: number;
 }
 
-export type StationSort = 'name' | 'votes' | 'bitrate' | 'country' | 'clickcount' | 'random';
+export type StationSort = 'name' | 'votes' | 'bitrate' | 'country' | 'language' | 'clickcount' | 'random';
 
 export const radioService = {
   async getTopStations(limit = 30, offset = 0): Promise<Station[]> {

@@ -1,5 +1,5 @@
 {
-  "name": "VoxWorld Explorer App",
+  "name": "VoxWorld App",
   "description": "An interactive global radio exploration platform featuring a world map, live streaming from thousands of stations, and AI-powered discovery via Gemini.",
   "requestFramePermissions": [
     "microphone"
