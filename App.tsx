@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Station, GeminiRecommendation } from './types';
 import { radioService, Country, StationSort } from './services/radioService';
@@ -13,12 +12,34 @@ const RECENT_KEY = 'voxworld_recently_played';
 const PAGE_SIZE = 30;
 const MAX_RECENT = 10;
 
-const AI_STARTERS = [
-  "Rainy day jazz in Paris",
-  "80s cyberpunk synthwave",
-  "Focus music for deep work",
-  "Traditional folk from Asia",
-  "Upbeat morning latin pop"
+const AI_STARTERS_CATEGORIES = [
+  {
+    title: "Mood & Vibe",
+    prompts: [
+      { text: "Rainy day jazz in Paris", icon: "🌧️" },
+      { text: "80s cyberpunk synthwave", icon: "🌃" },
+      { text: "Sun-drenched Bossa Nova from Rio", icon: "☀️" },
+      { text: "Nordic ambient for winter nights", icon: "❄️" }
+    ]
+  },
+  {
+    title: "Activities",
+    prompts: [
+      { text: "Focus music for deep work", icon: "🧠" },
+      { text: "High-energy Afrobeats for workout", icon: "🔥" },
+      { text: "Lo-fi beats for reading", icon: "📖" },
+      { text: "Tokyo midnight city pop for driving", icon: "🚗" }
+    ]
+  },
+  {
+    title: "Global Discovery",
+    prompts: [
+      { text: "Traditional folk from the Andes", icon: "🏔️" },
+      { text: "Desert blues from West Africa", icon: "🌵" },
+      { text: "Underground techno from Berlin", icon: "🔊" },
+      { text: "Traditional Celtic harp melodies", icon: "🍀" }
+    ]
+  }
 ];
 
 const DISCOVERY_TAGS = [
@@ -146,7 +167,7 @@ const App: React.FC = () => {
     }
   }, [currentFilterType, searchQuery, selectedCountry, recommendation, offset, sortBy]);
 
-  useEffect(() => { fetchStations(); }, [currentFilterType, selectedCountry, sortBy]);
+  useEffect(() => { fetchStations(); }, [currentFilterType, selectedCountry, sortBy, fetchStations]);
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -157,10 +178,10 @@ const App: React.FC = () => {
     return () => observer.disconnect();
   }, [hasMore, loading, loadingMore, fetchStations]);
 
-  const handleSearch = (e?: React.FormEvent) => {
+  const handleSearch = (e?: React.FormEvent, clearRecommendation = true) => {
     if (e) e.preventDefault();
     setSelectedCountry(null);
-    setRecommendation(null);
+    if (clearRecommendation) setRecommendation(null);
     setCurrentFilterType('search');
   };
 
@@ -351,7 +372,7 @@ const App: React.FC = () => {
               <h2 className="font-outfit font-semibold text-white">AI Discovery Lab</h2>
             </div>
             
-            <div className="space-y-4">
+            <div className="space-y-6">
               <div className="flex flex-wrap gap-1.5 mb-2">
                 {DISCOVERY_TAGS.map(tag => (
                   <button
@@ -372,8 +393,8 @@ const App: React.FC = () => {
                 <textarea 
                   value={aiQuery} 
                   onChange={(e) => setAiQuery(e.target.value)} 
-                  placeholder="Add specific details (e.g., 'reading', '1950s', 'heavy rain')..." 
-                  className="w-full bg-slate-900 border border-white/5 rounded-2xl p-4 text-sm h-32 focus:outline-none focus:ring-2 focus:ring-sky-500/30 resize-none transition-all"
+                  placeholder="Describe your destination (e.g., 'reading in a Tokyo cafe')..." 
+                  className="w-full bg-slate-900 border border-white/5 rounded-2xl p-4 text-sm h-28 focus:outline-none focus:ring-2 focus:ring-sky-500/30 resize-none transition-all placeholder:text-slate-600"
                 />
                 <button 
                   onClick={() => handleAiDiscover()} 
@@ -384,10 +405,36 @@ const App: React.FC = () => {
                 </button>
               </div>
 
-              <div className="flex flex-wrap gap-2">
-                {AI_STARTERS.map(starter => (
-                  <button key={starter} onClick={() => handleAiDiscover(starter)} className="text-[10px] font-bold px-3 py-1.5 rounded-full bg-white/5 border border-white/5 hover:bg-sky-500/20 hover:text-sky-400 hover:border-sky-500/30 transition-all text-slate-400">{starter}</button>
+              {/* Enhanced AI Starters UI */}
+              <div className="space-y-4">
+                {AI_STARTERS_CATEGORIES.map((category) => (
+                  <div key={category.title}>
+                    <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 px-1">{category.title}</h3>
+                    <div className="grid grid-cols-1 gap-1.5">
+                      {category.prompts.map((prompt) => (
+                        <button
+                          key={prompt.text}
+                          onClick={() => handleAiDiscover(prompt.text)}
+                          className="flex items-center gap-3 p-2 rounded-xl bg-white/5 border border-white/5 hover:bg-sky-500/10 hover:border-sky-500/20 hover:text-sky-400 transition-all text-left text-[11px] font-medium group"
+                        >
+                          <span className="text-base group-hover:scale-125 transition-transform">{prompt.icon}</span>
+                          <span className="truncate">{prompt.text}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 ))}
+                
+                <button 
+                  onClick={() => {
+                    const allPrompts = AI_STARTERS_CATEGORIES.flatMap(c => c.prompts);
+                    const randomPrompt = allPrompts[Math.floor(Math.random() * allPrompts.length)].text;
+                    handleAiDiscover(randomPrompt);
+                  }}
+                  className="w-full py-2.5 rounded-xl border border-dashed border-slate-700 hover:border-sky-500/50 hover:bg-sky-500/5 text-slate-500 hover:text-sky-400 transition-all text-[11px] font-bold uppercase tracking-widest flex items-center justify-center gap-2"
+                >
+                  <ICONS.Sparkles /> <span>Surprise Me</span>
+                </button>
               </div>
             </div>
           </div>
@@ -399,9 +446,23 @@ const App: React.FC = () => {
                 <div className="text-sky-400 group-hover:scale-125 transition-transform"><ICONS.Sparkles /></div>
               </div>
               <p className="text-[11px] text-slate-300 mb-4 leading-relaxed font-medium">{recommendation.description}</p>
-              <div className="flex flex-wrap gap-1.5">
+              <div className="flex flex-wrap gap-2">
                 {recommendation.suggestedCountries.map(c => (
-                  <button key={c} onClick={(e) => { e.stopPropagation(); setSearchQuery(`@${c}`); handleSearch(); }} className="text-[9px] bg-sky-500/30 px-2.5 py-1 rounded-full text-white font-bold border border-white/10 hover:bg-sky-500 transition-colors">{c}</button>
+                  <div key={c} className="flex items-center bg-sky-500/30 rounded-full border border-white/10 overflow-hidden hover:bg-sky-500/50 transition-all group/chip">
+                    <span className="text-[9px] px-2.5 py-1 text-white font-bold">{c}</span>
+                    <button 
+                      onClick={(e) => { 
+                        e.stopPropagation(); 
+                        setSearchQuery(`@${c}`); 
+                        setSelectedCountry(null);
+                        setCurrentFilterType('search');
+                      }} 
+                      className="p-1 px-2 border-l border-white/10 bg-white/5 hover:bg-white/20 text-white/70 hover:text-white transition-all flex items-center justify-center"
+                      title={`Filter by ${c}`}
+                    >
+                      <div className="scale-75"><ICONS.Search /></div>
+                    </button>
+                  </div>
                 ))}
               </div>
             </div>
