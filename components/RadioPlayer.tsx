@@ -12,44 +12,149 @@ interface RadioPlayerProps {
 
 const RadioPlayer: React.FC<RadioPlayerProps> = ({ station, isPlaying, onTogglePlay }) => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const playPromiseRef = useRef<Promise<void> | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const animationRef = useRef<number | null>(null);
+
   const [volume, setVolume] = useState(0.8);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; type: 'NETWORK' | 'DECODE' | 'ACCESS' | 'OFFLINE' | 'UNKNOWN' } | null>(null);
   const [isBuffering, setIsBuffering] = useState(false);
-  const [retryStage, setRetryStage] = useState(0); // 0: HTTPS upgrade, 1: Original Resolved, 2: Original Base
+  
+  // Stages for retry logic:
+  // 0: Resolved URL, Force HTTPS, CORS, HLS (if applicable)
+  // 1: Resolved URL, Native, CORS
+  // 2: Original URL, Native, CORS
+  // 3: Resolved URL, Native, NO-CORS
+  // 4: Original URL, Native, NO-CORS
+  // 5: Original URL, Shoutcast Hack (semicolon), NO-CORS, Cache-buster
+  const [retryStage, setRetryStage] = useState(0); 
 
   const getUrlForStage = useCallback((s: Station, stage: number) => {
-    const baseUrl = stage === 2 ? s.url : (s.url_resolved || s.url);
-    if (stage === 0 && baseUrl.startsWith('http://') && window.location.protocol === 'https:') {
-      return baseUrl.replace('http://', 'https://');
+    let url = (stage === 0 || stage === 1 || stage === 3) ? (s.url_resolved || s.url) : s.url;
+    
+    // Stage 0-1: Try HTTPS upgrade
+    if (stage <= 1 && url.startsWith('http://') && window.location.protocol === 'https:') {
+      url = url.replace('http://', 'https://');
     }
-    return baseUrl;
+    
+    // Stage 5: Final legacy Shoutcast/Icecast fallback hacks
+    if (stage === 5) {
+      if (!url.endsWith(';') && !url.includes('?')) {
+        url = url.endsWith('/') ? `${url};` : `${url}/;`;
+      }
+      const sep = url.includes('?') ? '&' : '?';
+      url = `${url}${sep}cb=${Date.now()}`;
+    }
+    
+    return url;
   }, []);
 
+  // Visualizer Logic
   useEffect(() => {
-    if (audioRef.current) audioRef.current.volume = volume;
-  }, [volume]);
+    if (!audioRef.current || !canvasRef.current) return;
+
+    const initAudioContext = () => {
+      try {
+        if (!audioCtxRef.current) {
+          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+          const ctx = new AudioContextClass();
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 128;
+          
+          if (!sourceRef.current) {
+            sourceRef.current = ctx.createMediaElementSource(audioRef.current!);
+            sourceRef.current.connect(analyser);
+            analyser.connect(ctx.destination);
+          }
+          
+          audioCtxRef.current = ctx;
+          analyserRef.current = analyser;
+        }
+        if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
+      } catch (err) {
+        console.warn('[VoxWorld] Visualizer disabled: CORS prevents audio node connection.');
+      }
+    };
+
+    const draw = () => {
+      if (!canvasRef.current || !analyserRef.current) return;
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const bufferLength = analyserRef.current.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      analyserRef.current.getByteFrequencyData(dataArray);
+
+      const width = canvas.width;
+      const height = canvas.height;
+      ctx.clearRect(0, 0, width, height);
+
+      const barWidth = (width / bufferLength) * 2.5;
+      let barHeight;
+      let x = 0;
+
+      for (let i = 0; i < bufferLength; i++) {
+        barHeight = (dataArray[i] / 255) * height;
+        const gradient = ctx.createLinearGradient(0, height, 0, 0);
+        gradient.addColorStop(0, 'rgba(14, 165, 233, 0.1)');
+        gradient.addColorStop(0.5, 'rgba(14, 165, 233, 0.5)');
+        gradient.addColorStop(1, 'rgba(14, 165, 233, 1)');
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        const r = barWidth / 2;
+        // Fallback for browsers that don't support roundRect
+        if (ctx.roundRect) {
+          ctx.roundRect(x, height - barHeight, barWidth - 2, barHeight, [r, r, 0, 0]);
+        } else {
+          ctx.rect(x, height - barHeight, barWidth - 2, barHeight);
+        }
+        ctx.fill();
+        x += barWidth + 1;
+      }
+      animationRef.current = requestAnimationFrame(draw);
+    };
+
+    // Only visualize if we are in a CORS-friendly stage
+    if (isPlaying && !error && retryStage < 3) {
+      initAudioContext();
+      draw();
+    } else {
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      const ctx = canvasRef.current?.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, canvasRef.current!.width, canvasRef.current!.height);
+    }
+
+    return () => { if (animationRef.current) cancelAnimationFrame(animationRef.current); };
+  }, [isPlaying, error, retryStage]);
+
+  useEffect(() => { if (audioRef.current) audioRef.current.volume = volume; }, [volume]);
 
   const safePlay = useCallback(async () => {
     const audio = audioRef.current;
     if (!audio || !isPlaying || error) return;
-
     try {
-      // If there's a pending play promise, we don't need to start a new one
-      // unless the old one finished.
       playPromiseRef.current = audio.play();
       await playPromiseRef.current;
       setError(null);
     } catch (err: any) {
-      if (err.name === 'AbortError') {
-        // Ignore AbortError as it is expected when we switch sources or pause
-        console.debug('Playback interrupted by new request');
-      } else {
-        throw err; // Re-throw to be caught by the general handler
+      if (err.name !== 'AbortError') {
+        console.error('[VoxWorld] Playback failed:', err.message);
+        throw err;
       }
     }
   }, [isPlaying, error]);
+
+  const handleManualRetry = () => {
+    setRetryStage(0);
+    setError(null);
+    setIsBuffering(true);
+    if (!isPlaying) onTogglePlay();
+  };
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -58,184 +163,127 @@ const RadioPlayer: React.FC<RadioPlayerProps> = ({ station, isPlaying, onToggleP
     setError(null);
     setIsBuffering(true);
     
-    // Reset audio state
-    audio.pause();
-    audio.src = '';
-    audio.load();
-
-    const streamUrl = getUrlForStage(station, retryStage);
-    const isHls = streamUrl.includes('.m3u8') || 
-                  station.codec === 'HLS' || 
-                  station.hls === 1 ||
-                  streamUrl.toLowerCase().includes('playlist');
-
-    const handlePlaybackError = (e: any) => {
-      // Extract useful info from the error event or object
-      const mediaError = audio.error;
-      const errorMsg = mediaError ? `Code ${mediaError.code}: ${mediaError.message || 'Stream error'}` : 'Unknown stream error';
-      
-      console.warn(`Playback Error (Stage ${retryStage}):`, errorMsg);
-      
-      // Automatic fallback logic
-      if (retryStage < 2) {
-        setRetryStage(prev => prev + 1);
-        return;
-      }
-
-      let displayMsg = "Stream unreachable.";
-      if (window.location.protocol === 'https:' && streamUrl.startsWith('http://')) {
-        displayMsg = "Insecure stream blocked. Try the direct link.";
-      } else if (mediaError?.code === 3) {
-        displayMsg = "Decode error: Format not supported.";
-      } else if (mediaError?.code === 4) {
-        displayMsg = "Station offline or address changed.";
-      }
-      
-      setError(displayMsg);
-      setIsBuffering(false);
-    };
-
     if (hlsRef.current) {
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
 
-    if (isHls && Hls.isSupported()) {
+    audio.pause();
+    
+    // NO-CORS stages allow playing streams that lack Access-Control headers
+    if (retryStage >= 3) {
+      audio.removeAttribute('crossOrigin');
+    } else {
+      audio.crossOrigin = "anonymous";
+    }
+
+    audio.src = '';
+    
+    // FIXED: Properly handle stream loading and completed switch logic for various audio sources
+    const streamUrl = getUrlForStage(station, retryStage);
+
+    if (streamUrl.includes('.m3u8') && Hls.isSupported() && retryStage === 0) {
       const hls = new Hls({
         enableWorker: true,
-        lowLatencyMode: true,
-        manifestLoadingMaxRetry: 2,
-        levelLoadingMaxRetry: 2,
-      });
-      hlsRef.current = hls;
-      hls.loadSource(streamUrl);
-      hls.attachMedia(audio);
-      
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        setIsBuffering(false);
-        if (isPlaying) safePlay().catch(handlePlaybackError);
-      });
-
-      hls.on(Hls.Events.ERROR, (_, data) => {
-        if (data.fatal) {
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            hls.startLoad();
-          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            hls.recoverMediaError();
-          } else {
-            handlePlaybackError("HLS Fatal Error");
-          }
+        xhrSetup: (xhr) => {
+          if (retryStage < 3) xhr.withCredentials = false;
         }
       });
+      hls.loadSource(streamUrl);
+      hls.attachMedia(audio);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (isPlaying) safePlay();
+      });
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) {
+          console.warn('[VoxWorld] HLS Fatal Error:', data.type);
+          setRetryStage(prev => prev + 1);
+        }
+      });
+      hlsRef.current = hls;
     } else {
       audio.src = streamUrl;
-      // Some streams require credentials/cors for metadata
-      audio.crossOrigin = "anonymous";
-      
+      audio.load();
       if (isPlaying) {
-        safePlay().catch(handlePlaybackError);
+        safePlay().catch(() => {
+          // If native playback fails, advance retry stage
+          setRetryStage(prev => prev + 1);
+        });
       }
     }
 
-    const onCanPlay = () => { setIsBuffering(false); };
-    const onWaiting = () => setIsBuffering(true);
-    const onPlaying = () => { setIsBuffering(false); setError(null); };
-    
-    audio.addEventListener('canplay', onCanPlay);
-    audio.addEventListener('playing', onPlaying);
-    audio.addEventListener('waiting', onWaiting);
-    audio.addEventListener('error', handlePlaybackError);
-
     return () => {
-      audio.removeEventListener('canplay', onCanPlay);
-      audio.removeEventListener('playing', onPlaying);
-      audio.removeEventListener('waiting', onWaiting);
-      audio.removeEventListener('error', handlePlaybackError);
-      
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
-      
-      audio.pause();
-      audio.src = '';
-      audio.removeAttribute('src');
-      audio.load();
     };
-  }, [station, isPlaying, retryStage, getUrlForStage, safePlay]);
+  }, [station, retryStage, isPlaying, getUrlForStage, safePlay]);
 
-  // Reset retries when station changes
-  useEffect(() => { 
-    setRetryStage(0);
-    setError(null);
-  }, [station?.stationuuid]);
+  // Handle errors and retries
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const handleError = () => {
+      if (retryStage < 5) {
+        setRetryStage(prev => prev + 1);
+      } else {
+        setIsBuffering(false);
+        setError({
+          message: 'This frequency is currently unreachable.',
+          type: 'OFFLINE'
+        });
+      }
+    };
+
+    const handleCanPlay = () => {
+      setIsBuffering(false);
+      setError(null);
+    };
+
+    const handleWaiting = () => setIsBuffering(true);
+
+    audio.addEventListener('error', handleError);
+    audio.addEventListener('canplay', handleCanPlay);
+    audio.addEventListener('waiting', handleWaiting);
+    audio.addEventListener('stalled', handleWaiting);
+
+    return () => {
+      audio.removeEventListener('error', handleError);
+      audio.removeEventListener('canplay', handleCanPlay);
+      audio.removeEventListener('waiting', handleWaiting);
+      audio.removeEventListener('stalled', handleWaiting);
+    };
+  }, [retryStage]);
 
   if (!station) return null;
 
   return (
-    <div className="fixed bottom-0 left-0 right-0 glass border-t border-white/10 p-4 z-50 flex flex-col md:flex-row items-center justify-between gap-4 animate-in fade-in slide-in-from-bottom-4 shadow-[0_-10px_40px_rgba(0,0,0,0.5)]">
-      <div className="flex items-center gap-4 w-full md:w-auto">
-        <div className="w-14 h-14 bg-slate-800 rounded-xl overflow-hidden flex-shrink-0 flex items-center justify-center relative border border-white/5 shadow-inner">
-          {station.favicon ? (
-            <img src={station.favicon} alt="" className="w-full h-full object-contain p-1" onError={(e) => (e.currentTarget.style.display = 'none')}/>
-          ) : <ICONS.Radio />}
-          {isBuffering && isPlaying && !error && (
-            <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
-              <div className="w-6 h-6 border-2 border-sky-500 border-t-transparent rounded-full animate-spin"></div>
-            </div>
-          )}
+    <div className="fixed bottom-0 left-0 right-0 h-24 glass border-t border-white/5 z-50 flex items-center px-4 md:px-8">
+      <audio ref={audioRef} />
+      
+      <div className="flex items-center gap-4 w-full max-w-7xl mx-auto">
+        {/* Station Identity */}
+        <div className="flex items-center gap-4 min-w-0 md:w-1/3">
+          <div className="w-12 h-12 bg-slate-800 rounded-lg flex-shrink-0 flex items-center justify-center overflow-hidden border border-white/5 relative">
+            {station.favicon ? (
+              <img src={station.favicon} alt="" className="w-full h-full object-contain p-1" onError={(e) => (e.currentTarget.style.display = 'none')}/>
+            ) : ( <ICONS.Radio /> )}
+            {isBuffering && (
+              <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+                <div className="w-5 h-5 border-2 border-sky-500 border-t-transparent rounded-full animate-spin"></div>
+              </div>
+            )}
+          </div>
+          <div className="min-w-0">
+            <h3 className="font-bold text-white truncate text-sm">{station.name}</h3>
+            <p className="text-[10px] text-slate-500 truncate">{station.country} • {station.codec} {station.bitrate ? `${station.bitrate}kbps` : ''}</p>
+          </div>
         </div>
-        <div className="overflow-hidden flex-1">
-          <h3 className="text-sm font-bold truncate text-white leading-tight">{station.name}</h3>
-          {error ? (
-            <div className="flex flex-col gap-1 mt-1">
-              <p className="text-[10px] text-rose-400 font-bold uppercase tracking-tight bg-rose-500/10 px-2 py-0.5 rounded border border-rose-500/20 w-fit">
-                {error}
-              </p>
-              <a 
-                href={station.url_resolved || station.url} 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="text-[9px] text-sky-400 hover:text-sky-300 font-bold underline flex items-center gap-1"
-              >
-                Try Direct Stream <ICONS.Share />
-              </a>
-            </div>
-          ) : (
-            <p className="text-xs text-slate-400 truncate flex items-center gap-2 mt-0.5">
-              <span className="opacity-50 font-medium">{station.country}</span>
-              <span className="w-1 h-1 rounded-full bg-slate-700"></span>
-              <span className="italic">{station.codec || 'Auto'} • {station.bitrate ? `${station.bitrate}kbps` : 'Variable'}</span>
-            </p>
-          )}
-        </div>
-      </div>
 
-      <div className="flex flex-col items-center gap-1">
-        <button 
-          onClick={onTogglePlay}
-          className={`w-14 h-14 rounded-full flex items-center justify-center transition-all transform hover:scale-105 active:scale-95 shadow-xl ${
-            error ? 'bg-slate-800 text-slate-500 cursor-not-allowed opacity-50' : 'bg-sky-500 hover:bg-sky-400 text-white'
-          }`}
-          disabled={!!error}
-        >
-          {isPlaying && !error ? <ICONS.Pause /> : <ICONS.Play />}
-        </button>
-      </div>
-
-      <div className="flex items-center gap-6 w-full md:w-auto max-w-xs bg-white/5 px-4 py-3 rounded-2xl border border-white/5">
-        <div className="text-slate-500"><ICONS.ThumbsUp /></div>
-        <input 
-          type="range" min="0" max="1" step="0.01" 
-          value={volume} 
-          onChange={(e) => setVolume(parseFloat(e.target.value))}
-          className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-sky-500"
-        />
-      </div>
-
-      <audio ref={audioRef} preload="auto" />
-    </div>
-  );
-};
-
-export default RadioPlayer;
+        {/* Playback Controls & Visualizer */}
+        <div className="flex-1 flex flex-col items-center gap-1">
+          <button 
+            onClick={onTogglePlay}
+            className="w-10 h-10 bg-white text-black rounded-full flex items-center justify-center hover:scale-11
